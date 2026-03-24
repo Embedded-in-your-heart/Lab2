@@ -1,12 +1,11 @@
 [project]
 name = "stm32-sensor-dashboard"
 version = "0.1.0"
-description = "TCP Server + Dash Dashboard for STM32 B-L475E-IOT01A sensor visualization"
+description = "TCP Server + WebSocket Dashboard for STM32 B-L475E-IOT01A sensor visualization"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "dash>=2.14.0",
-    "plotly>=5.18.0",
+    "websockets>=13.0",
 ]
 
 [project.scripts]

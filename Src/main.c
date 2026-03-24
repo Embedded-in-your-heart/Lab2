@@ -24,10 +24,10 @@
 #define TERMINAL_USE
 
 /* Update SSID and PASSWORD with own Access point settings */
-#define SSID     "ikari"
-#define PASSWORD "iloveikari"
+#define SSID     "Zhao"
+#define PASSWORD "Zhao49800312"
 
-uint8_t RemoteIP[] = {172,17,0,189};
+uint8_t RemoteIP[] = {192,168,0,18};
 #define RemotePORT	25550
 
 #define WIFI_WRITE_TIMEOUT 10000
@@ -197,115 +197,159 @@ int main(void)
   TERMOUT("****** WIFI Module in TCP Client mode demonstration ****** \n\n");
   TERMOUT("Sending Accelerometer + Gyroscope data with Significant Motion detection\n\n");
 
-  /*Initialize  WIFI module */
-  if(WIFI_Init() ==  WIFI_STATUS_OK)
+  /* Initialize WIFI module */
+  TERMOUT("[LOG] Initializing WiFi module...\n");
+  if(WIFI_Init() !=  WIFI_STATUS_OK)
   {
-    TERMOUT("> WIFI Module Initialized.\n");
-    if(WIFI_GetMAC_Address(MAC_Addr, sizeof(MAC_Addr)) == WIFI_STATUS_OK)
-    {
-      TERMOUT("> es-wifi module MAC Address : %X:%X:%X:%X:%X:%X\n",
-               MAC_Addr[0],
-               MAC_Addr[1],
-               MAC_Addr[2],
-               MAC_Addr[3],
-               MAC_Addr[4],
-               MAC_Addr[5]);
-    }
-    else
-    {
-      TERMOUT("> ERROR : CANNOT get MAC address\n");
-      BSP_LED_On(LED2);
-    }
+    TERMOUT("[ERR] WiFi module initialization FAILED.\n");
+    BSP_LED_On(LED2);
+    goto wifi_error;
+  }
+  TERMOUT("[LOG] WiFi module initialized OK.\n");
 
-    if( WIFI_Connect(SSID, PASSWORD, WIFI_ECN_WPA2_PSK) == WIFI_STATUS_OK)
-    {
-      TERMOUT("> es-wifi module connected \n");
-      if(WIFI_GetIP_Address(IP_Addr, sizeof(IP_Addr)) == WIFI_STATUS_OK)
-      {
-        TERMOUT("> es-wifi module got IP Address : %d.%d.%d.%d\n",
-               IP_Addr[0],
-               IP_Addr[1],
-               IP_Addr[2],
-               IP_Addr[3]);
-
-        TERMOUT("> Trying to connect to Server: %d.%d.%d.%d:%d ...\n",
-               RemoteIP[0],
-               RemoteIP[1],
-               RemoteIP[2],
-               RemoteIP[3],
-							 RemotePORT);
-
-        while (Trials--)
-        {
-          if( WIFI_OpenClientConnection(0, WIFI_TCP_PROTOCOL, "TCP_CLIENT", RemoteIP, RemotePORT, 0) == WIFI_STATUS_OK)
-          {
-            TERMOUT("> TCP Connection opened successfully.\n");
-            Socket = 0;
-            break;
-          }
-        }
-        if(Socket == -1)
-        {
-          TERMOUT("> ERROR : Cannot open Connection\n");
-          BSP_LED_On(LED2);
-        }
-      }
-      else
-      {
-        TERMOUT("> ERROR : es-wifi module CANNOT get IP address\n");
-        BSP_LED_On(LED2);
-      }
-    }
-    else
-    {
-      TERMOUT("> ERROR : es-wifi module NOT connected\n");
-      BSP_LED_On(LED2);
-    }
+  if(WIFI_GetMAC_Address(MAC_Addr, sizeof(MAC_Addr)) == WIFI_STATUS_OK)
+  {
+    TERMOUT("[LOG] MAC Address: %X:%X:%X:%X:%X:%X\n",
+             MAC_Addr[0], MAC_Addr[1], MAC_Addr[2],
+             MAC_Addr[3], MAC_Addr[4], MAC_Addr[5]);
   }
   else
   {
-    TERMOUT("> ERROR : WIFI Module cannot be initialized.\n");
+    TERMOUT("[WARN] Cannot get MAC address, continuing...\n");
+  }
+
+  /* Connect to WiFi AP with retry */
+  TERMOUT("[LOG] Connecting to AP \"%s\"...\n", SSID);
+  for (int wifi_try = 1; wifi_try <= CONNECTION_TRIAL_MAX; wifi_try++)
+  {
+    TERMOUT("[LOG] WiFi connect attempt %d/%d\n", wifi_try, CONNECTION_TRIAL_MAX);
+    if(WIFI_Connect(SSID, PASSWORD, WIFI_ECN_WPA2_PSK) == WIFI_STATUS_OK)
+    {
+      TERMOUT("[LOG] WiFi connected to \"%s\".\n", SSID);
+      break;
+    }
+    TERMOUT("[WARN] WiFi connect attempt %d failed.\n", wifi_try);
+    if (wifi_try == CONNECTION_TRIAL_MAX)
+    {
+      TERMOUT("[ERR] WiFi connect FAILED after %d attempts.\n", CONNECTION_TRIAL_MAX);
+      BSP_LED_On(LED2);
+      goto wifi_error;
+    }
+    HAL_Delay(1000);
+  }
+
+  if(WIFI_GetIP_Address(IP_Addr, sizeof(IP_Addr)) == WIFI_STATUS_OK)
+  {
+    TERMOUT("[LOG] IP Address: %d.%d.%d.%d\n",
+           IP_Addr[0], IP_Addr[1], IP_Addr[2], IP_Addr[3]);
+  }
+  else
+  {
+    TERMOUT("[ERR] Cannot get IP address.\n");
+    BSP_LED_On(LED2);
+    goto wifi_error;
+  }
+
+  /* Open TCP connection with retry */
+  TERMOUT("[LOG] Connecting to server %d.%d.%d.%d:%d ...\n",
+         RemoteIP[0], RemoteIP[1], RemoteIP[2], RemoteIP[3], RemotePORT);
+
+  Trials = CONNECTION_TRIAL_MAX;
+  while (Trials--)
+  {
+    TERMOUT("[LOG] TCP connect attempt %d/%d\n",
+           CONNECTION_TRIAL_MAX - Trials, CONNECTION_TRIAL_MAX);
+    if(WIFI_OpenClientConnection(0, WIFI_TCP_PROTOCOL, "TCP_CLIENT", RemoteIP, RemotePORT, 0) == WIFI_STATUS_OK)
+    {
+      TERMOUT("[LOG] TCP connection opened OK.\n");
+      Socket = 0;
+      break;
+    }
+    TERMOUT("[WARN] TCP connect attempt %d failed.\n", CONNECTION_TRIAL_MAX - Trials);
+    HAL_Delay(500);
+  }
+  if(Socket == -1)
+  {
+    TERMOUT("[ERR] TCP connect FAILED after %d attempts.\n", CONNECTION_TRIAL_MAX);
     BSP_LED_On(LED2);
   }
 
+wifi_error:
+
+  TERMOUT("[LOG] Entering main loop.\n");
+  uint32_t send_count = 0;
+
   while(1)
   {
-    if(Socket != -1)
+    if(Socket == -1)
     {
-      /* Read accelerometer data */
-      BSP_ACCELERO_AccGetXYZ(pDataXYZ);
-
-      /* Read gyroscope data */
-      BSP_GYRO_GetXYZ(pGyroXYZ);
-
-      /* Check significant motion flag (set by ISR) */
-      sig_motion_flag = 0;
-      if (significant_motion_detected)
-      {
-        sig_motion_flag = 1;
-        significant_motion_detected = 0;
-        BSP_LED_Toggle(LED2);
-        TERMOUT("> Significant Motion Detected!\n");
-      }
-
-      /* Format data as JSON */
-      sprintf((char *)TxData,
-        "{\"acc\":{\"x\":%d,\"y\":%d,\"z\":%d},"
-        "\"gyro\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
-        "\"sig_motion\":%d}\n",
-        pDataXYZ[0], pDataXYZ[1], pDataXYZ[2],
-        pGyroXYZ[0], pGyroXYZ[1], pGyroXYZ[2],
-        sig_motion_flag);
-
-      ret = WIFI_SendData(Socket, (uint8_t *)TxData, strlen((char *)TxData), &Datalen, WIFI_WRITE_TIMEOUT);
-      if (ret != WIFI_STATUS_OK)
-      {
-        TERMOUT("> ERROR : Failed to Send Data, connection closed\n");
-        break;
-      }
-
-      HAL_Delay(SENSOR_SEND_INTERVAL);
+      /* No connection - blink LED and wait */
+      BSP_LED_Toggle(LED2);
+      HAL_Delay(500);
+      continue;
     }
+
+    /* Read accelerometer data */
+    BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+
+    /* Read gyroscope data */
+    BSP_GYRO_GetXYZ(pGyroXYZ);
+
+    /* Check significant motion flag (set by ISR) */
+    sig_motion_flag = 0;
+    if (significant_motion_detected)
+    {
+      sig_motion_flag = 1;
+      significant_motion_detected = 0;
+      BSP_LED_Toggle(LED2);
+      TERMOUT("[EVENT] Significant Motion Detected!\n");
+    }
+
+    /* Format data as JSON */
+    sprintf((char *)TxData,
+      "{\"acc\":{\"x\":%d,\"y\":%d,\"z\":%d},"
+      "\"gyro\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
+      "\"sig_motion\":%d}\n",
+      pDataXYZ[0], pDataXYZ[1], pDataXYZ[2],
+      pGyroXYZ[0], pGyroXYZ[1], pGyroXYZ[2],
+      sig_motion_flag);
+
+    ret = WIFI_SendData(Socket, (uint8_t *)TxData, strlen((char *)TxData), &Datalen, WIFI_WRITE_TIMEOUT);
+    if (ret != WIFI_STATUS_OK)
+    {
+      TERMOUT("[ERR] Send failed (count=%lu), closing socket.\n", send_count);
+      WIFI_CloseClientConnection(0);
+      Socket = -1;
+
+      /* Try to reconnect */
+      TERMOUT("[LOG] Attempting TCP reconnect...\n");
+      HAL_Delay(1000);
+      for (int retry = 1; retry <= CONNECTION_TRIAL_MAX; retry++)
+      {
+        TERMOUT("[LOG] Reconnect attempt %d/%d\n", retry, CONNECTION_TRIAL_MAX);
+        if(WIFI_OpenClientConnection(0, WIFI_TCP_PROTOCOL, "TCP_CLIENT", RemoteIP, RemotePORT, 0) == WIFI_STATUS_OK)
+        {
+          TERMOUT("[LOG] Reconnected OK.\n");
+          Socket = 0;
+          send_count = 0;
+          break;
+        }
+        HAL_Delay(500);
+      }
+      if (Socket == -1)
+      {
+        TERMOUT("[ERR] Reconnect failed. Idling.\n");
+      }
+      continue;
+    }
+
+    send_count++;
+    if (send_count % 100 == 0)
+    {
+      TERMOUT("[LOG] Sent %lu packets.\n", send_count);
+    }
+
+    HAL_Delay(SENSOR_SEND_INTERVAL);
   }
 }
 
@@ -373,8 +417,12 @@ static void SystemClock_Config(void)
   */
 PUTCHAR_PROTOTYPE
 {
-  /* Place your implementation of fputc here */
-  /* e.g. write a character to the USART1 and Loop until the end of transmission */
+  /* Auto-insert \r before \n for proper serial terminal line endings */
+  if (ch == '\n')
+  {
+    uint8_t cr = '\r';
+    HAL_UART_Transmit(&hDiscoUart, &cr, 1, 0xFFFF);
+  }
   HAL_UART_Transmit(&hDiscoUart, (uint8_t *)&ch, 1, 0xFFFF);
 
   return ch;

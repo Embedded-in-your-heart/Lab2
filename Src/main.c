@@ -44,17 +44,41 @@ uint8_t RemoteIP[] = {192,168,0,18};
 #define TERMOUT(...)
 #endif
 
-/* LSM6DSL significant motion detection registers and bits */
-#define LSM6DSL_CTRL10_C              0x19
-#define LSM6DSL_FUNC_EN_BIT          0x04
-#define LSM6DSL_SIGN_MOTION_EN_BIT   0x01
-#define LSM6DSL_PEDO_EN_BIT          0x10
-#define LSM6DSL_MD1_CFG              0x5E
-#define LSM6DSL_INT1_SIGN_MOT_BIT    0x40
-#define LSM6DSL_FUNC_SRC_REG         0x53
-#define LSM6DSL_SIGN_MOT_IA_BIT      0x40
+/*
+ * LSM6DSL Significant Motion Detection - Register definitions
+ * Reference: LSM6DSL datasheet (DocID029467) + AN5040
+ *
+ * Registers already defined in lsm6dsl.h (BSP driver):
+ *   LSM6DSL_ACC_GYRO_FUNC_CFG_ACCESS  0x01
+ *   LSM6DSL_ACC_GYRO_CTRL3_C          0x12
+ *   LSM6DSL_ACC_GYRO_CTRL10_C         0x19
+ *   LSM6DSL_ACC_GYRO_FUNC_SRC         0x53
+ *   LSM6DSL_ACC_GYRO_TAP_CFG1         0x58
+ *   LSM6DSL_ACC_GYRO_MD1_CFG          0x5E
+ *   LSM6DSL_ACC_GYRO_SM_STEP_THS      0x13  (embedded bank)
+ *
+ * Bit definitions (from datasheet):
+ */
 
-/* LSM6DSL INT1 pin on B-L475E-IOT01A: PD11 */
+/* FUNC_CFG_ACCESS (0x01) */
+#define FUNC_CFG_EN                   0x80  /* Bit 7: enable embedded function bank */
+
+/* CTRL10_C (0x19) */
+#define FUNC_EN                       0x04  /* Bit 2: enable embedded functions */
+#define SIGN_MOTION_EN                0x01  /* Bit 0: enable significant motion */
+#define PEDO_EN                       0x10  /* Bit 4: enable pedometer (required for sig motion) */
+
+/* TAP_CFG (0x58) */
+#define INTERRUPTS_ENABLE             0x80  /* Bit 7: enable basic interrupts routing */
+#define LIR                           0x01  /* Bit 0: latched interrupt */
+
+/* MD1_CFG (0x5E) */
+#define INT1_SIGN_MOT                 0x40  /* Bit 6: route significant motion to INT1 */
+
+/* FUNC_SRC1 (0x53) */
+#define SIGN_MOT_IA                   0x40  /* Bit 6: significant motion event detected */
+
+/* LSM6DSL INT1 pin on B-L475E-IOT01A: PD11 (from board schematic UM2153) */
 #define LSM6DSL_INT1_GPIO_PORT        GPIOD
 #define LSM6DSL_INT1_GPIO_PIN         GPIO_PIN_11
 #define LSM6DSL_INT1_GPIO_CLK_ENABLE() __HAL_RCC_GPIOD_CLK_ENABLE()
@@ -66,9 +90,8 @@ extern UART_HandleTypeDef hDiscoUart;
 #endif /* TERMINAL_USE */
 static uint8_t RxData [500];
 
-/* Significant motion detection flag (set in ISR) */
+/* Significant motion detection flag (set in EXTI ISR) */
 static volatile uint8_t significant_motion_detected = 0;
-
 
 /* Private function prototypes -----------------------------------------------*/
 #if defined (TERMINAL_USE)
@@ -108,24 +131,71 @@ static void LSM6DSL_INT1_GPIO_Init(void)
 }
 
 /**
-  * @brief  Enable LSM6DSL significant motion detection
-  *         Routes significant motion event to INT1 pin
+  * @brief  Enable LSM6DSL significant motion detection (AN5040 procedure)
+  *
+  *   Initialization sequence per AN5040 Section 5.5:
+  *   1. Set accelerometer ODR >= 26 Hz           (done by BSP_ACCELERO_Init at 52 Hz)
+  *   2. Set significant motion threshold          (embedded bank register SM_THS)
+  *   3. Enable FUNC_EN + SIGN_MOTION_EN + PEDO_EN in CTRL10_C
+  *   4. Enable INTERRUPTS_ENABLE + LIR in TAP_CFG
+  *   5. Route interrupt to INT1 via MD1_CFG
+  *   6. Clear any pending event by reading FUNC_SRC
   */
 static void LSM6DSL_SignificantMotion_Init(void)
 {
   uint8_t tmp;
 
-  /* Enable embedded functions and significant motion in CTRL10_C */
-  tmp = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_CTRL10_C);
-  tmp |= (LSM6DSL_FUNC_EN_BIT | LSM6DSL_SIGN_MOTION_EN_BIT | LSM6DSL_PEDO_EN_BIT);
-  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_CTRL10_C, tmp);
+  /* Step 1: Configure threshold via embedded function register bank */
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW,
+    LSM6DSL_ACC_GYRO_FUNC_CFG_ACCESS, FUNC_CFG_EN);
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW,
+    LSM6DSL_ACC_GYRO_SM_STEP_THS, 0x01);
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW,
+    LSM6DSL_ACC_GYRO_FUNC_CFG_ACCESS, 0x00);
 
-  /* Route significant motion interrupt to INT1 via MD1_CFG */
-  tmp = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_MD1_CFG);
-  tmp |= LSM6DSL_INT1_SIGN_MOT_BIT;
-  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_MD1_CFG, tmp);
+  /* Step 2: Enable embedded functions + significant motion + pedometer */
+  tmp = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_CTRL10_C);
+  tmp |= (FUNC_EN | SIGN_MOTION_EN | PEDO_EN);
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_CTRL10_C, tmp);
 
-  TERMOUT("> LSM6DSL Significant Motion detection enabled on INT1 (PD11).\n");
+  /* Step 3: Enable interrupt routing + latched interrupt mode */
+  tmp = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_TAP_CFG1);
+  tmp |= (INTERRUPTS_ENABLE | LIR);
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_TAP_CFG1, tmp);
+
+  /* Step 4: Route significant motion event to INT1 */
+  tmp = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_MD1_CFG);
+  tmp |= INT1_SIGN_MOT;
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_MD1_CFG, tmp);
+
+  /* Step 5: Clear any residual event */
+  (void)SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_FUNC_SRC);
+
+  /* Debug readback */
+  TERMOUT("> [SigMot] CTRL1_XL  = 0x%02X  (ODR+FS)\n",
+    SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, 0x10));
+  TERMOUT("> [SigMot] CTRL3_C   = 0x%02X  (BDU/IF_INC/INT polarity)\n",
+    SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_CTRL3_C));
+  TERMOUT("> [SigMot] CTRL10_C  = 0x%02X  (expect 0x15)\n",
+    SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_CTRL10_C));
+  TERMOUT("> [SigMot] TAP_CFG1  = 0x%02X  (expect 0x81)\n",
+    SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_TAP_CFG1));
+  TERMOUT("> [SigMot] MD1_CFG   = 0x%02X  (expect 0x40)\n",
+    SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_MD1_CFG));
+  TERMOUT("> [SigMot] FUNC_SRC  = 0x%02X\n",
+    SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_FUNC_SRC));
+  TERMOUT("> [SigMot] INT1 pin  = %d\n",
+    HAL_GPIO_ReadPin(LSM6DSL_INT1_GPIO_PORT, LSM6DSL_INT1_GPIO_PIN));
+
+  /* Verify SM_THS in embedded bank */
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW,
+    LSM6DSL_ACC_GYRO_FUNC_CFG_ACCESS, FUNC_CFG_EN);
+  TERMOUT("> [SigMot] SM_THS    = 0x%02X  (threshold)\n",
+    SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_ACC_GYRO_SM_STEP_THS));
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW,
+    LSM6DSL_ACC_GYRO_FUNC_CFG_ACCESS, 0x00);
+
+  TERMOUT("> Significant Motion detection enabled on INT1 (PD11).\n");
 }
 
 /**
@@ -190,7 +260,7 @@ int main(void)
     TERMOUT("> Gyroscope initialized.\n");
   }
 
-  /* Initialize significant motion detection */
+  /* Initialize significant motion detection (GPIO EXTI + LSM6DSL registers) */
   LSM6DSL_INT1_GPIO_Init();
   LSM6DSL_SignificantMotion_Init();
 
@@ -295,7 +365,20 @@ wifi_error:
     /* Read gyroscope data */
     BSP_GYRO_GetXYZ(pGyroXYZ);
 
-    /* Check significant motion flag (set by ISR) */
+    /*
+     * Check significant motion: poll FUNC_SRC as backup for EXTI.
+     * With LIR=1, reading FUNC_SRC also clears the latched INT1 pin,
+     * allowing the next event to trigger a new rising edge on EXTI.
+     */
+    {
+      uint8_t func_src = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW,
+                                         LSM6DSL_ACC_GYRO_FUNC_SRC);
+      if (func_src & SIGN_MOT_IA)
+      {
+        significant_motion_detected = 1;
+      }
+    }
+
     sig_motion_flag = 0;
     if (significant_motion_detected)
     {
@@ -349,7 +432,15 @@ wifi_error:
       TERMOUT("[LOG] Sent %lu packets.\n", send_count);
     }
 
-    HAL_Delay(SENSOR_SEND_INTERVAL);
+    /* Wait for next send interval, but break early if sig motion ISR fires */
+    {
+      uint32_t wait_start = HAL_GetTick();
+      while ((HAL_GetTick() - wait_start) < SENSOR_SEND_INTERVAL)
+      {
+        if (significant_motion_detected)
+          break;
+      }
+    }
   }
 }
 
@@ -465,7 +556,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     }
     case (LSM6DSL_INT1_GPIO_PIN):
     {
-      /* LSM6DSL INT1: significant motion detected */
+      /* LSM6DSL INT1: significant motion detected via hardware interrupt */
       significant_motion_detected = 1;
       break;
     }

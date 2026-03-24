@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STM32 Sensor Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0f0f1a;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  .title-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    padding: 12px 20px;
+    background: #1a1a2e;
+    border-radius: 10px;
+    border: 1px solid #2a2a4a;
+  }
+  .title-bar h1 { font-size: 22px; color: #fff; }
+  .title-right { display: flex; align-items: center; gap: 16px; }
+
+  #status { font-size: 14px; }
+
+  /* Toggle switch */
+  .toggle-wrap {
+    display: flex; align-items: center; gap: 8px; font-size: 13px; color: #aaa;
+    user-select: none; cursor: pointer;
+  }
+  .toggle-switch {
+    position: relative; width: 40px; height: 22px;
+    background: #333; border-radius: 11px; transition: background 0.2s;
+  }
+  .toggle-switch.on { background: #51cf66; }
+  .toggle-knob {
+    position: absolute; top: 2px; left: 2px;
+    width: 18px; height: 18px; background: #fff;
+    border-radius: 50%; transition: left 0.2s;
+  }
+  .toggle-switch.on .toggle-knob { left: 20px; }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .card {
+    background: #1a1a2e;
+    border-radius: 10px;
+    padding: 14px 18px;
+  }
+  .card-title { font-size: 12px; color: #888; margin-bottom: 4px; }
+  .card-value { font-size: 22px; font-weight: bold; }
+  .card-unit  { font-size: 12px; color: #888; }
+
+  #chart { height: 560px; }
+
+  .events-panel {
+    margin-top: 16px;
+    padding: 14px 20px;
+    background: #1a1a2e;
+    border-radius: 10px;
+    border: 1px solid #2a2a4a;
+  }
+  .events-panel h3 { font-size: 16px; color: #ffd43b; margin-bottom: 10px; }
+  .events-log { max-height: 120px; overflow-y: auto; }
+  .event-item { color: #ffd43b; font-size: 13px; padding: 2px 0; }
+  .no-events  { color: #555; font-size: 13px; }
+
+  @media (max-width: 700px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="title-bar">
+  <h1>STM32 B-L475E-IOT01A  Sensor Dashboard</h1>
+  <div class="title-right">
+    <div class="toggle-wrap" id="gravity-toggle">
+      <span>Remove Gravity</span>
+      <div class="toggle-switch" id="gravity-switch">
+        <div class="toggle-knob"></div>
+      </div>
+    </div>
+    <div id="status"></div>
+  </div>
+</div>
+
+<div class="cards">
+  <div class="card" id="card-acc" style="border:1px solid #ff6b6b33">
+    <div class="card-title">Acc X / Y / Z</div>
+    <span class="card-value" style="color:#ff6b6b">-- -- --</span>
+    <span class="card-unit">mg</span>
+  </div>
+  <div class="card" id="card-gx" style="border:1px solid #51cf6633">
+    <div class="card-title">Gyro X</div>
+    <span class="card-value" style="color:#51cf66">--</span>
+    <span class="card-unit">mdps</span>
+  </div>
+  <div class="card" id="card-gy" style="border:1px solid #339af033">
+    <div class="card-title">Gyro Y</div>
+    <span class="card-value" style="color:#339af0">--</span>
+    <span class="card-unit">mdps</span>
+  </div>
+  <div class="card" id="card-gz" style="border:1px solid #cc5de833">
+    <div class="card-title">Gyro Z</div>
+    <span class="card-value" style="color:#cc5de8">--</span>
+    <span class="card-unit">mdps</span>
+  </div>
+</div>
+
+<div id="chart"></div>
+
+<div class="events-panel">
+  <h3>Significant Motion Events</h3>
+  <div class="events-log" id="events-log">
+    <div class="no-events">No events yet.</div>
+  </div>
+</div>
+
+<script>
+var MAX_POINTS = 300;
+var DATA_STALE_MS = 500;
+var GRAVITY_BASELINE_SAMPLES = 50; // first N samples used as gravity baseline
+
+// Data buffers (raw values)
+var accX = [], accY = [], accZ = [];
+var gyroX = [], gyroY = [], gyroZ = [];
+var sigMotionIndices = [];
+var sigMotionTimes = [];
+var totalSamples = 0;
+var lastDataTime = 0;
+var tcpConnected = false;
+
+// Gravity removal
+var removeGravity = false;
+var gravityX = 0, gravityY = 0, gravityZ = 0;
+var gravityCalibrated = false;
+var calibrationCount = 0;
+var calSumX = 0, calSumY = 0, calSumZ = 0;
+
+// --- Toggle button ---
+document.getElementById('gravity-toggle').addEventListener('click', function() {
+  removeGravity = !removeGravity;
+  var sw = document.getElementById('gravity-switch');
+  if (removeGravity) {
+    sw.classList.add('on');
+  } else {
+    sw.classList.remove('on');
+  }
+  // Update title
+  var titleEl = document.querySelector('#card-acc .card-title');
+  titleEl.textContent = removeGravity ? 'Acc X / Y / Z (no gravity)' : 'Acc X / Y / Z';
+  scheduleChartUpdate();
+  updateCards();
+});
+
+// --- Initialize Plotly chart with proper subplot domains ---
+var layout = {
+  xaxis:  { showgrid: true, gridcolor: '#222244', anchor: 'y' },
+  yaxis:  { showgrid: true, gridcolor: '#222244', title: 'Accelerometer (mg)', domain: [0.55, 1] },
+  xaxis2: { showgrid: true, gridcolor: '#222244', anchor: 'y2' },
+  yaxis2: { showgrid: true, gridcolor: '#222244', title: 'Gyroscope (mdps)', domain: [0, 0.42] },
+  template: 'plotly_dark',
+  paper_bgcolor: '#0f0f1a',
+  plot_bgcolor: '#16162a',
+  font: { color: '#ccc' },
+  margin: { l: 60, r: 30, t: 30, b: 40 },
+  legend: { orientation: 'h', y: 1.08, x: 0.5, xanchor: 'center', font: { size: 11 } },
+  hovermode: 'x unified',
+  shapes: [],
+};
+
+var traces = [
+  { y: [], mode: 'lines', name: 'Acc X',  line: { color: '#ff6b6b', width: 1.5 }, legendgroup: 'acc',  xaxis: 'x',  yaxis: 'y' },
+  { y: [], mode: 'lines', name: 'Acc Y',  line: { color: '#51cf66', width: 1.5 }, legendgroup: 'acc',  xaxis: 'x',  yaxis: 'y' },
+  { y: [], mode: 'lines', name: 'Acc Z',  line: { color: '#339af0', width: 1.5 }, legendgroup: 'acc',  xaxis: 'x',  yaxis: 'y' },
+  { y: [], mode: 'lines', name: 'Gyro X', line: { color: '#ff6b6b', width: 1.5, dash: 'dot' }, legendgroup: 'gyro', xaxis: 'x2', yaxis: 'y2' },
+  { y: [], mode: 'lines', name: 'Gyro Y', line: { color: '#51cf66', width: 1.5, dash: 'dot' }, legendgroup: 'gyro', xaxis: 'x2', yaxis: 'y2' },
+  { y: [], mode: 'lines', name: 'Gyro Z', line: { color: '#339af0', width: 1.5, dash: 'dot' }, legendgroup: 'gyro', xaxis: 'x2', yaxis: 'y2' },
+];
+
+Plotly.newPlot('chart', traces, layout, { responsive: true });
+
+// --- Gravity helpers ---
+function getDisplayAcc(raw, gravity) {
+  if (!removeGravity || !gravityCalibrated) return raw.slice();
+  return raw.map(function(v) { return v - gravity; });
+}
+
+// --- Batched chart update ---
+var pendingUpdate = false;
+
+function scheduleChartUpdate() {
+  if (pendingUpdate) return;
+  pendingUpdate = true;
+  requestAnimationFrame(function() {
+    pendingUpdate = false;
+    var n = accX.length;
+    var xs = Array.from({ length: n }, function(_, i) { return i; });
+
+    var dispAccX = getDisplayAcc(accX, gravityX);
+    var dispAccY = getDisplayAcc(accY, gravityY);
+    var dispAccZ = getDisplayAcc(accZ, gravityZ);
+
+    var shapes = [];
+    for (var s = 0; s < sigMotionIndices.length; s++) {
+      var idx = sigMotionIndices[s];
+      if (idx < n) {
+        var refs = [['x', 'y'], ['x2', 'y2']];
+        for (var r = 0; r < refs.length; r++) {
+          shapes.push({
+            type: 'line', x0: idx, x1: idx, y0: 0, y1: 1,
+            xref: refs[r][0], yref: refs[r][1] + ' domain',
+            line: { color: '#ffd43b', width: 2, dash: 'dash' }, opacity: 0.7,
+          });
+        }
+      }
+    }
+
+    Plotly.update('chart',
+      { x: [xs, xs, xs, xs, xs, xs], y: [dispAccX, dispAccY, dispAccZ, gyroX, gyroY, gyroZ] },
+      { shapes: shapes, 'yaxis.title': removeGravity ? 'Accelerometer (mg, no gravity)' : 'Accelerometer (mg)' },
+      [0, 1, 2, 3, 4, 5]
+    );
+  });
+}
+
+// --- Update value cards ---
+function updateCards() {
+  var n = accX.length;
+  if (n === 0) return;
+
+  var dx = removeGravity && gravityCalibrated ? accX[n-1] - gravityX : accX[n-1];
+  var dy = removeGravity && gravityCalibrated ? accY[n-1] - gravityY : accY[n-1];
+  var dz = removeGravity && gravityCalibrated ? accZ[n-1] - gravityZ : accZ[n-1];
+
+  document.querySelector('#card-acc .card-value').textContent =
+    Math.round(dx) + '  ' + Math.round(dy) + '  ' + Math.round(dz);
+  document.querySelector('#card-gx .card-value').textContent =
+    gyroX[n-1].toFixed(1);
+  document.querySelector('#card-gy .card-value').textContent =
+    gyroY[n-1].toFixed(1);
+  document.querySelector('#card-gz .card-value').textContent =
+    gyroZ[n-1].toFixed(1);
+}
+
+// --- Status badge ---
+function setStatus(dotColor, text, textColor) {
+  var el = document.getElementById('status');
+  el.textContent = '';
+  el.style.color = textColor;
+
+  var dot = document.createElement('span');
+  dot.textContent = '\u25CF ';
+  dot.style.color = dotColor;
+  el.appendChild(dot);
+  el.appendChild(document.createTextNode(text));
+}
+
+function refreshStatus() {
+  if (!tcpConnected) {
+    setStatus('#ff6b6b', 'Disconnected \u2014 waiting for connection', '#ff6b6b');
+    return;
+  }
+  if (lastDataTime === 0) {
+    setStatus('#888', 'Connected, waiting for data...', '#888');
+    return;
+  }
+  var elapsed = Date.now() - lastDataTime;
+  if (elapsed < DATA_STALE_MS) {
+    setStatus('#51cf66', 'Connected | Samples: ' + totalSamples, '#51cf66');
+  } else {
+    setStatus('#ffd43b', 'No data received \u2014 stale (' + Math.floor(elapsed / 1000) + 's)', '#ffd43b');
+  }
+}
+
+setInterval(refreshStatus, 200);
+
+// --- Events log ---
+function updateEventsLog() {
+  var log = document.getElementById('events-log');
+  log.textContent = '';
+  if (sigMotionTimes.length === 0) {
+    var d = document.createElement('div');
+    d.className = 'no-events';
+    d.textContent = 'No events yet.';
+    log.appendChild(d);
+    return;
+  }
+  var recent = sigMotionTimes.slice(-20).reverse();
+  for (var i = 0; i < recent.length; i++) {
+    var div = document.createElement('div');
+    div.className = 'event-item';
+    div.textContent = '\u26A1 ' + recent[i];
+    log.appendChild(div);
+  }
+}
+
+// --- Push helper ---
+function pushData(arr, val) {
+  arr.push(val);
+  if (arr.length > MAX_POINTS) arr.shift();
+}
+
+// --- WebSocket ---
+function connectWS() {
+  fetch('/config')
+    .then(function(r) { return r.json(); })
+    .then(function(cfg) { startWS('ws://' + location.hostname + ':' + cfg.ws_port); })
+    .catch(function() { startWS('ws://' + location.hostname + ':8765'); });
+}
+
+function startWS(url) {
+  var ws = new WebSocket(url);
+
+  ws.onopen = function() { console.log('[WS] Connected'); };
+
+  ws.onmessage = function(event) {
+    var msg = JSON.parse(event.data);
+
+    if (msg.type === 'data') {
+      var acc = msg.acc || {};
+      var gyro = msg.gyro || {};
+
+      var ax = acc.x || 0, ay = acc.y || 0, az = acc.z || 0;
+
+      pushData(accX, ax);
+      pushData(accY, ay);
+      pushData(accZ, az);
+      pushData(gyroX, gyro.x || 0);
+      pushData(gyroY, gyro.y || 0);
+      pushData(gyroZ, gyro.z || 0);
+      totalSamples = msg.sample_count;
+      lastDataTime = Date.now();
+      tcpConnected = true;
+
+      // Calibrate gravity from first N samples
+      if (!gravityCalibrated) {
+        calSumX += ax;
+        calSumY += ay;
+        calSumZ += az;
+        calibrationCount++;
+        if (calibrationCount >= GRAVITY_BASELINE_SAMPLES) {
+          gravityX = calSumX / calibrationCount;
+          gravityY = calSumY / calibrationCount;
+          gravityZ = calSumZ / calibrationCount;
+          gravityCalibrated = true;
+          console.log('[Gravity] Baseline: X=' + gravityX.toFixed(1) +
+            ' Y=' + gravityY.toFixed(1) + ' Z=' + gravityZ.toFixed(1));
+        }
+      }
+
+      if (msg.sig_motion === 1) {
+        sigMotionIndices.push(accX.length - 1);
+        sigMotionTimes.push(msg.time);
+        updateEventsLog();
+      }
+
+      scheduleChartUpdate();
+      updateCards();
+
+    } else if (msg.type === 'status') {
+      tcpConnected = (msg.state === 'connected');
+      totalSamples = msg.sample_count || totalSamples;
+      if (!tcpConnected) {
+        lastDataTime = 0;
+        // Reset gravity calibration on disconnect
+        gravityCalibrated = false;
+        calibrationCount = 0;
+        calSumX = 0; calSumY = 0; calSumZ = 0;
+      }
+      refreshStatus();
+
+    } else if (msg.type === 'sig_motion_history') {
+      var times = msg.times || [];
+      for (var i = 0; i < times.length; i++) {
+        if (sigMotionTimes.indexOf(times[i]) === -1) {
+          sigMotionTimes.push(times[i]);
+        }
+      }
+      updateEventsLog();
+    }
+  };
+
+  ws.onclose = function() {
+    console.log('[WS] Disconnected, reconnecting in 2s...');
+    tcpConnected = false;
+    lastDataTime = 0;
+    refreshStatus();
+    setTimeout(function() { startWS(url); }, 2000);
+  };
+
+  ws.onerror = function() { ws.close(); };
+}
+
+setStatus('#888', 'Connecting...', '#888');
+connectWS();
+</script>
+</body>
+</html>

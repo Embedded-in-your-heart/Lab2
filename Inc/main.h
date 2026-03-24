@@ -1,6 +1,6 @@
 /**
   ******************************************************************************
-  * @file    Wifi/WiFi_Client_Server/Inc/main.h 
+  * @file    Wifi/WiFi_Client_Server/Inc/main.h
   * @author  MCD Application Team
   * @brief   Header for main.c module
   ******************************************************************************
@@ -23,8 +23,9 @@
 /* Includes ------------------------------------------------------------------*/
 #include "wifi.h"
 #include "stm32l475e_iot01.h"
-#include "stdio.h"
 #include "stm32l475e_iot01_accelero.h"
+#include "stm32l475e_iot01_gyro.h"
+#include "stdio.h"
 
 void SPI3_IRQHandler(void);
 
@@ -34,4 +35,3 @@ void SPI3_IRQHandler(void);
 /* Exported functions ------------------------------------------------------- */
 
 #endif /* __MAIN_H */
-

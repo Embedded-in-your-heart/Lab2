@@ -1,0 +1,12 @@
+# Build artifacts
+STM32CubeIDE/Debug/
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.list
+*.map
+
+# macOS
+.DS_Store

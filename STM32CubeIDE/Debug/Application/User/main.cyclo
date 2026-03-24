@@ -1,0 +1,5 @@
+C:/Users/User/STM32CubeIDE/workspace_1.19.0/WiFi_Client_Server/Src/main.c:74:5:main	13
+C:/Users/User/STM32CubeIDE/workspace_1.19.0/WiFi_Client_Server/Src/main.c:247:13:SystemClock_Config	3
+C:/Users/User/STM32CubeIDE/workspace_1.19.0/WiFi_Client_Server/Src/main.c:290:1:__io_putchar	1
+C:/Users/User/STM32CubeIDE/workspace_1.19.0/WiFi_Client_Server/Src/main.c:325:6:HAL_GPIO_EXTI_Callback	2
+C:/Users/User/STM32CubeIDE/workspace_1.19.0/WiFi_Client_Server/Src/main.c:341:6:SPI3_IRQHandler	1

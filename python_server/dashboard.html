@@ -70,11 +70,57 @@
     background: #1a1a2e;
     border-radius: 10px;
     border: 1px solid #2a2a4a;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .events-panel.flash {
+    border-color: #ffd43b;
+    box-shadow: 0 0 20px rgba(255, 212, 59, 0.4), inset 0 0 10px rgba(255, 212, 59, 0.05);
   }
   .events-panel h3 { font-size: 16px; color: #ffd43b; margin-bottom: 10px; }
-  .events-log { max-height: 120px; overflow-y: auto; }
-  .event-item { color: #ffd43b; font-size: 13px; padding: 2px 0; }
+  .events-counter {
+    display: inline-block;
+    background: #ffd43b;
+    color: #0f0f1a;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 1px 8px;
+    border-radius: 10px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .events-log { max-height: 160px; overflow-y: auto; }
+  .event-item {
+    color: #ffd43b;
+    font-size: 13px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: opacity 0.6s, background 0.6s;
+  }
+  .event-item.new {
+    background: rgba(255, 212, 59, 0.2);
+    animation: eventPulse 1.5s ease-out;
+  }
   .no-events  { color: #555; font-size: 13px; }
+
+  /* Full-screen flash overlay */
+  .motion-flash {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(255, 212, 59, 0.12);
+    pointer-events: none;
+    z-index: 9999;
+    animation: flashFade 1s ease-out forwards;
+  }
+
+  @keyframes eventPulse {
+    0%   { background: rgba(255, 212, 59, 0.4); transform: translateX(-4px); }
+    30%  { transform: translateX(0); }
+    100% { background: rgba(255, 212, 59, 0); }
+  }
+  @keyframes flashFade {
+    0%   { opacity: 1; }
+    100% { opacity: 0; }
+  }
 
   @media (max-width: 700px) {
     .cards { grid-template-columns: repeat(2, 1fr); }
@@ -121,8 +167,8 @@
 
 <div id="chart"></div>
 
-<div class="events-panel">
-  <h3>Significant Motion Events</h3>
+<div class="events-panel" id="events-panel">
+  <h3>Significant Motion Events <span class="events-counter" id="events-counter" style="display:none">0</span></h3>
   <div class="events-log" id="events-log">
     <div class="no-events">No events yet.</div>
   </div>
@@ -288,7 +334,28 @@ function refreshStatus() {
 setInterval(refreshStatus, 200);
 
 // --- Events log ---
-function updateEventsLog() {
+var flashTimeout = null;
+
+function triggerMotionFlash() {
+  // Full-screen flash overlay
+  var overlay = document.createElement('div');
+  overlay.className = 'motion-flash';
+  document.body.appendChild(overlay);
+  setTimeout(function() { overlay.remove(); }, 1000);
+
+  // Panel border glow
+  var panel = document.getElementById('events-panel');
+  panel.classList.add('flash');
+  if (flashTimeout) clearTimeout(flashTimeout);
+  flashTimeout = setTimeout(function() { panel.classList.remove('flash'); }, 2000);
+
+  // Update counter badge
+  var counter = document.getElementById('events-counter');
+  counter.style.display = 'inline-block';
+  counter.textContent = sigMotionTimes.length;
+}
+
+function updateEventsLog(isNew) {
   var log = document.getElementById('events-log');
   log.textContent = '';
   if (sigMotionTimes.length === 0) {
@@ -301,10 +368,12 @@ function updateEventsLog() {
   var recent = sigMotionTimes.slice(-20).reverse();
   for (var i = 0; i < recent.length; i++) {
     var div = document.createElement('div');
-    div.className = 'event-item';
+    div.className = (isNew && i === 0) ? 'event-item new' : 'event-item';
     div.textContent = '\u26A1 ' + recent[i];
     log.appendChild(div);
   }
+
+  if (isNew) triggerMotionFlash();
 }
 
 // --- Push helper ---
@@ -364,7 +433,7 @@ function startWS(url) {
       if (msg.sig_motion === 1) {
         sigMotionIndices.push(accX.length - 1);
         sigMotionTimes.push(msg.time);
-        updateEventsLog();
+        updateEventsLog(true);
       }
 
       scheduleChartUpdate();
@@ -389,7 +458,7 @@ function startWS(url) {
           sigMotionTimes.push(times[i]);
         }
       }
-      updateEventsLog();
+      updateEventsLog(false);
     }
   };
 

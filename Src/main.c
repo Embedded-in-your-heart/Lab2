@@ -17,22 +17,26 @@
   */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "string.h"
 
 /* Private defines -----------------------------------------------------------*/
 
 #define TERMINAL_USE
 
 /* Update SSID and PASSWORD with own Access point settings */
-#define SSID     "Tutel"
-#define PASSWORD "25423333"
+#define SSID     "ikari"
+#define PASSWORD "iloveikari"
 
-uint8_t RemoteIP[] = {10,242,250,62};
-#define RemotePORT	8888
+uint8_t RemoteIP[] = {172,17,0,189};
+#define RemotePORT	25550
 
 #define WIFI_WRITE_TIMEOUT 10000
 #define WIFI_READ_TIMEOUT  10000
 
 #define CONNECTION_TRIAL_MAX          10
+
+/* Sensor data send interval in ms */
+#define SENSOR_SEND_INTERVAL          100
 
 #if defined (TERMINAL_USE)
 #define TERMOUT(...)  printf(__VA_ARGS__)
@@ -40,11 +44,30 @@ uint8_t RemoteIP[] = {10,242,250,62};
 #define TERMOUT(...)
 #endif
 
+/* LSM6DSL significant motion detection registers and bits */
+#define LSM6DSL_CTRL10_C              0x19
+#define LSM6DSL_FUNC_EN_BIT          0x04
+#define LSM6DSL_SIGN_MOTION_EN_BIT   0x01
+#define LSM6DSL_PEDO_EN_BIT          0x10
+#define LSM6DSL_MD1_CFG              0x5E
+#define LSM6DSL_INT1_SIGN_MOT_BIT    0x40
+#define LSM6DSL_FUNC_SRC_REG         0x53
+#define LSM6DSL_SIGN_MOT_IA_BIT      0x40
+
+/* LSM6DSL INT1 pin on B-L475E-IOT01A: PD11 */
+#define LSM6DSL_INT1_GPIO_PORT        GPIOD
+#define LSM6DSL_INT1_GPIO_PIN         GPIO_PIN_11
+#define LSM6DSL_INT1_GPIO_CLK_ENABLE() __HAL_RCC_GPIOD_CLK_ENABLE()
+#define LSM6DSL_INT1_EXTI_IRQn        EXTI15_10_IRQn
+
 /* Private variables ---------------------------------------------------------*/
 #if defined (TERMINAL_USE)
 extern UART_HandleTypeDef hDiscoUart;
 #endif /* TERMINAL_USE */
 static uint8_t RxData [500];
+
+/* Significant motion detection flag (set in ISR) */
+static volatile uint8_t significant_motion_detected = 0;
 
 
 /* Private function prototypes -----------------------------------------------*/
@@ -59,12 +82,51 @@ static uint8_t RxData [500];
 #endif /* TERMINAL_USE */
 
 static void SystemClock_Config(void);
-
-
-
+static void LSM6DSL_SignificantMotion_Init(void);
+static void LSM6DSL_INT1_GPIO_Init(void);
 extern  SPI_HandleTypeDef hspi;
 
 /* Private functions ---------------------------------------------------------*/
+
+/**
+  * @brief  Configure LSM6DSL INT1 pin (PD11) as EXTI interrupt
+  */
+static void LSM6DSL_INT1_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct;
+
+  LSM6DSL_INT1_GPIO_CLK_ENABLE();
+
+  GPIO_InitStruct.Pin = LSM6DSL_INT1_GPIO_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LSM6DSL_INT1_GPIO_PORT, &GPIO_InitStruct);
+
+  HAL_NVIC_SetPriority(LSM6DSL_INT1_EXTI_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(LSM6DSL_INT1_EXTI_IRQn);
+}
+
+/**
+  * @brief  Enable LSM6DSL significant motion detection
+  *         Routes significant motion event to INT1 pin
+  */
+static void LSM6DSL_SignificantMotion_Init(void)
+{
+  uint8_t tmp;
+
+  /* Enable embedded functions and significant motion in CTRL10_C */
+  tmp = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_CTRL10_C);
+  tmp |= (LSM6DSL_FUNC_EN_BIT | LSM6DSL_SIGN_MOTION_EN_BIT | LSM6DSL_PEDO_EN_BIT);
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_CTRL10_C, tmp);
+
+  /* Route significant motion interrupt to INT1 via MD1_CFG */
+  tmp = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_MD1_CFG);
+  tmp |= LSM6DSL_INT1_SIGN_MOT_BIT;
+  SENSOR_IO_Write(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW, LSM6DSL_MD1_CFG, tmp);
+
+  TERMOUT("> LSM6DSL Significant Motion detection enabled on INT1 (PD11).\n");
+}
 
 /**
   * @brief  Main program
@@ -75,12 +137,14 @@ int main(void)
 {
   uint8_t  MAC_Addr[6] = {0};
   uint8_t  IP_Addr[4] = {0};
-  uint8_t TxData[100] = "STM32 : Hello!\n";
-  int32_t Socket = -1;
+  uint8_t  TxData[512];
+  int32_t  Socket = -1;
   uint16_t Datalen;
-  int32_t ret;
-  int16_t Trials = CONNECTION_TRIAL_MAX;
-  int16_t pDataXYZ[3];
+  int32_t  ret;
+  int16_t  Trials = CONNECTION_TRIAL_MAX;
+  int16_t  pDataXYZ[3] = {0};
+  float    pGyroXYZ[3] = {0.0f};
+  uint8_t  sig_motion_flag = 0;
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
@@ -106,16 +170,32 @@ int main(void)
   BSP_COM_Init(COM1, &hDiscoUart);
 #endif /* TERMINAL_USE */
 
+  /* Initialize accelerometer */
+  if (BSP_ACCELERO_Init() != ACCELERO_OK)
+  {
+    TERMOUT("> ERROR : Accelerometer init failed\n");
+  }
+  else
+  {
+    TERMOUT("> Accelerometer initialized.\n");
+  }
+
+  /* Initialize gyroscope */
+  if (BSP_GYRO_Init() != GYRO_OK)
+  {
+    TERMOUT("> ERROR : Gyroscope init failed\n");
+  }
+  else
+  {
+    TERMOUT("> Gyroscope initialized.\n");
+  }
+
+  /* Initialize significant motion detection */
+  LSM6DSL_INT1_GPIO_Init();
+  LSM6DSL_SignificantMotion_Init();
+
   TERMOUT("****** WIFI Module in TCP Client mode demonstration ****** \n\n");
-  TERMOUT("TCP Client Instructions :\n");
-  TERMOUT("1- Make sure your Phone is connected to the same network that\n");
-  TERMOUT("   you configured using the Configuration Access Point.\n");
-  TERMOUT("2- Create a server by using the android application TCP Server\n");
-  TERMOUT("   with port(8002).\n");
-  TERMOUT("3- Get the Network Name or IP Address of your Android from the step 2.\n\n");
-  BSP_ACCELERO_Init();
-
-
+  TERMOUT("Sending Accelerometer + Gyroscope data with Significant Motion detection\n\n");
 
   /*Initialize  WIFI module */
   if(WIFI_Init() ==  WIFI_STATUS_OK)
@@ -190,37 +270,41 @@ int main(void)
 
   while(1)
   {
-	uint32_t acc_start_time = 0;
-	if (HAL_GetTick() - acc_start_time >= 3000) {
-		BSP_ACCELERO_AccGetXYZ(pDataXYZ);
-		TERMOUT("Got Acc: %d, %d, %d\n", pDataXYZ[0], pDataXYZ[1], pDataXYZ[2]);
-		acc_start_time = HAL_GetTick();
-	}
-
     if(Socket != -1)
     {
-      ret = WIFI_ReceiveData(Socket, RxData, sizeof(RxData)-1, &Datalen, WIFI_READ_TIMEOUT);
-      if(ret == WIFI_STATUS_OK)
+      /* Read accelerometer data */
+      BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+
+      /* Read gyroscope data */
+      BSP_GYRO_GetXYZ(pGyroXYZ);
+
+      /* Check significant motion flag (set by ISR) */
+      sig_motion_flag = 0;
+      if (significant_motion_detected)
       {
-        if(Datalen > 0)
-        {
-          RxData[Datalen]=0;
-          TERMOUT("Received: %s\n",RxData);
-          BSP_ACCELERO_AccGetXYZ(pDataXYZ);
-          sprintf(TxData, "Got Acc: %d, %d, %d\n", pDataXYZ[0], pDataXYZ[1], pDataXYZ[2]);
-          ret = WIFI_SendData(Socket, TxData, sizeof(TxData), &Datalen, WIFI_WRITE_TIMEOUT);
-          if (ret != WIFI_STATUS_OK)
-          {
-            TERMOUT("> ERROR : Failed to Send Data, connection closed\n");
-            break;
-          }
-        }
+        sig_motion_flag = 1;
+        significant_motion_detected = 0;
+        BSP_LED_Toggle(LED2);
+        TERMOUT("> Significant Motion Detected!\n");
       }
-      else
+
+      /* Format data as JSON */
+      sprintf((char *)TxData,
+        "{\"acc\":{\"x\":%d,\"y\":%d,\"z\":%d},"
+        "\"gyro\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
+        "\"sig_motion\":%d}\n",
+        pDataXYZ[0], pDataXYZ[1], pDataXYZ[2],
+        pGyroXYZ[0], pGyroXYZ[1], pGyroXYZ[2],
+        sig_motion_flag);
+
+      ret = WIFI_SendData(Socket, (uint8_t *)TxData, strlen((char *)TxData), &Datalen, WIFI_WRITE_TIMEOUT);
+      if (ret != WIFI_STATUS_OK)
       {
-        TERMOUT("> ERROR : Failed to Receive Data, connection closed\n");
+        TERMOUT("> ERROR : Failed to Send Data, connection closed\n");
         break;
       }
+
+      HAL_Delay(SENSOR_SEND_INTERVAL);
     }
   }
 }
@@ -329,6 +413,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     case (GPIO_PIN_1):
     {
       SPI_WIFI_ISR();
+      break;
+    }
+    case (LSM6DSL_INT1_GPIO_PIN):
+    {
+      /* LSM6DSL INT1: significant motion detected */
+      significant_motion_detected = 1;
       break;
     }
     default:
